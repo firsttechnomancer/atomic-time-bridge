@@ -6,13 +6,12 @@ import os
 import time
 
 app = Flask(__name__)
-
 eastern = pytz.timezone("US/Eastern")
 
-# --- External time sources ---
+# -- API SOURCES --
 
 def fetch_worldtimeapi():
-    for _ in range(2):  # Retry twice
+    for _ in range(2):
         try:
             r = requests.get("http://worldtimeapi.org/api/timezone/America/New_York", timeout=5)
             if r.status_code == 200:
@@ -31,17 +30,26 @@ def fetch_timeapiio():
             time.sleep(0.5)
     return None, None
 
-# --- Time formatting ---
+# -- NORMALIZE: Force UTC → EST/EDT with pytz
 
-def normalize_to_est(raw_iso):
+def normalize_utc_to_est(raw_iso):
     try:
-        dt = datetime.fromisoformat(raw_iso.replace("Z", "+00:00"))
-        dt = dt.astimezone(eastern)
-        return dt.strftime("%Y-%m-%d %H:%M:%S %Z%z"), dt.tzname(), dt.utcoffset().total_seconds(), dt
-    except:
-        return None, None, None, None
+        # Always assume input is UTC
+        utc_dt = datetime.fromisoformat(raw_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+        est_dt = utc_dt.astimezone(eastern)
 
-# --- UTC + EST from Render system (reference only) ---
+        return {
+            "formatted_time": est_dt.strftime("%Y-%m-%d %H:%M:%S %Z%z"),
+            "tz_label": est_dt.tzname(),
+            "utc_offset_seconds": est_dt.utcoffset().total_seconds(),
+            "converted_from": utc_dt.isoformat(),
+            "raw_input": raw_iso,
+            "object_dt": est_dt
+        }
+    except:
+        return None
+
+# -- SYSTEM UTC REFERENCE
 
 def system_reference_times():
     try:
@@ -53,6 +61,8 @@ def system_reference_times():
         }
     except:
         return {}
+
+# -- MAIN ENDPOINT
 
 @app.route('/current-time')
 def current_time():
@@ -67,26 +77,27 @@ def current_time():
     if t2:
         sources.append((t2, s2))
 
-    # Normalize all sources to EST
+    # Normalize and check drift
     for raw, source in sources:
-        formatted, tz_label, offset_sec, dt = normalize_to_est(raw)
-        if formatted:
-            # Also compare to system UTC
+        result = normalize_utc_to_est(raw)
+        if result:
+            dt = result["object_dt"]
             now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
             drift = abs((now_utc - dt.astimezone(timezone.utc)).total_seconds())
 
-            if drift <= 120:  # Accept only if drift < 2 minutes
+            if drift <= 120:
                 return jsonify({
-                    "formatted_time": formatted,
-                    "tz_label": tz_label,
-                    "utc_offset_seconds": offset_sec,
+                    "formatted_time": result["formatted_time"],
+                    "tz_label": result["tz_label"],
+                    "utc_offset_seconds": result["utc_offset_seconds"],
                     "source_used": source,
-                    "raw": raw,
+                    "converted_from_utc": result["converted_from"],
+                    "raw": result["raw_input"],
                     "render_utc": system_reference_times().get("render_utc"),
                     "drift_vs_system_utc_seconds": drift
                 })
 
-    # All sources failed or drift too large
+    # All sources failed or drifted
     return jsonify({
         "error": "No valid source passed drift check",
         "render_utc": system_reference_times().get("render_utc")
