@@ -1,58 +1,64 @@
 from flask import Flask, jsonify
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 import pytz
 import os
+import time
 
 app = Flask(__name__)
 
-# Timezone to normalize to
 eastern = pytz.timezone("US/Eastern")
 
-# Helper to fetch from worldtimeapi.org
+# --- External time sources ---
+
 def fetch_worldtimeapi():
-    try:
-        r = requests.get("http://worldtimeapi.org/api/timezone/America/New_York", timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            return data.get("datetime"), "atomic1"
-    except:
-        return None, None
+    for _ in range(2):  # Retry twice
+        try:
+            r = requests.get("http://worldtimeapi.org/api/timezone/America/New_York", timeout=5)
+            if r.status_code == 200:
+                return r.json().get("datetime"), "atomic1"
+        except:
+            time.sleep(0.5)
     return None, None
 
-# Helper to fetch from timeapi.io
 def fetch_timeapiio():
-    try:
-        r = requests.get("https://timeapi.io/api/Time/current/zone?timeZone=America/New_York", timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            return data.get("dateTime"), "atomic2"
-    except:
-        return None, None
+    for _ in range(2):
+        try:
+            r = requests.get("https://timeapi.io/api/Time/current/zone?timeZone=America/New_York", timeout=5)
+            if r.status_code == 200:
+                return r.json().get("dateTime"), "atomic2"
+        except:
+            time.sleep(0.5)
     return None, None
 
-# Helper to use server time
-def fetch_local_time():
-    try:
-        local_dt = datetime.now().astimezone(eastern)
-        return local_dt.isoformat(), "local"
-    except:
-        return None, None
+# --- Time formatting ---
 
-# Normalize timestamp to EST/EDT with DST awareness
-def normalize_to_eastern(raw_iso):
+def normalize_to_est(raw_iso):
     try:
         dt = datetime.fromisoformat(raw_iso.replace("Z", "+00:00"))
         dt = dt.astimezone(eastern)
-        return dt.strftime("%Y-%m-%d %H:%M:%S %Z%z"), dt.tzname(), dt.utcoffset().total_seconds()
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z%z"), dt.tzname(), dt.utcoffset().total_seconds(), dt
     except:
-        return None, None, None
+        return None, None, None, None
+
+# --- UTC + EST from Render system (reference only) ---
+
+def system_reference_times():
+    try:
+        utc_now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        local_est = utc_now.astimezone(eastern)
+        return {
+            "render_utc": utc_now.isoformat(),
+            "render_est": local_est.isoformat()
+        }
+    except:
+        return {}
 
 @app.route('/current-time')
 def current_time():
     sources = []
 
-    # Try all sources
+    # Try both atomic APIs
     t1, s1 = fetch_worldtimeapi()
     if t1:
         sources.append((t1, s1))
@@ -61,29 +67,29 @@ def current_time():
     if t2:
         sources.append((t2, s2))
 
-    t3, s3 = fetch_local_time()
-    if t3:
-        sources.append((t3, s3))
+    # Normalize all sources to EST
+    for raw, source in sources:
+        formatted, tz_label, offset_sec, dt = normalize_to_est(raw)
+        if formatted:
+            # Also compare to system UTC
+            now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
+            drift = abs((now_utc - dt.astimezone(timezone.utc)).total_seconds())
 
-    # Pick the first successful source
-    for timestamp, source in sources:
-        try:
-            formatted, tzname, offset = normalize_to_eastern(timestamp)
-            if formatted:
+            if drift <= 120:  # Accept only if drift < 2 minutes
                 return jsonify({
                     "formatted_time": formatted,
-                    "tz_label": tzname,
-                    "utc_offset_seconds": offset,
+                    "tz_label": tz_label,
+                    "utc_offset_seconds": offset_sec,
                     "source_used": source,
-                    "raw": timestamp
+                    "raw": raw,
+                    "render_utc": system_reference_times().get("render_utc"),
+                    "drift_vs_system_utc_seconds": drift
                 })
-        except:
-            continue
 
-    # All sources failed
+    # All sources failed or drift too large
     return jsonify({
-        "error": "All time sources failed",
-        "source_used": None
+        "error": "No valid source passed drift check",
+        "render_utc": system_reference_times().get("render_utc")
     }), 503
 
 if __name__ == '__main__':
