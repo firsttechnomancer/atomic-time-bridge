@@ -34,20 +34,24 @@ def fetch_timeapiio():
 
 def normalize_utc_to_est(raw_iso):
     try:
-        # Always assume input is UTC
+        # Always assume input is UTC, then correct
         utc_dt = datetime.fromisoformat(raw_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
-        est_dt = utc_dt.astimezone(eastern)
+        corrected_utc = utc_dt - timedelta(seconds=420)  # subtract 7 minutes
+        est_dt = corrected_utc.astimezone(eastern)
 
         return {
             "formatted_time": est_dt.strftime("%Y-%m-%d %H:%M:%S %Z%z"),
             "tz_label": est_dt.tzname(),
             "utc_offset_seconds": est_dt.utcoffset().total_seconds(),
-            "converted_from": utc_dt.isoformat(),
+            "converted_from_utc": corrected_utc.isoformat(),
             "raw_input": raw_iso,
-            "object_dt": est_dt
+            "object_dt": est_dt,
+            "correction_applied": True,
+            "utc_offset_adjustment_seconds": -420
         }
     except:
         return None
+
 
 # -- SYSTEM UTC REFERENCE
 
